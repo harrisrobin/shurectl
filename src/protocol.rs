@@ -1,12 +1,13 @@
 //! Shure USB HID Protocol Implementation
 //!
-//! Covers four devices:
+//! Binary protocol covers four devices; the original MV7 ASCII protocol is in `mv7`.
+//! Binary models:
 //!   - Shure MVX2U       (VID 0x14ED, PID 0x1013) — XLR-to-USB interface (Gen 1)
 //!   - Shure MVX2U Gen 2 (VID 0x14ED, PID 0x1033) — XLR-to-USB interface (Gen 2, new DSP)
 //!   - Shure MV6         (VID 0x14ED, PID 0x1026) — USB gaming microphone
 //!   - Shure MV7+        (VID 0x14ED, PID 0x1019) — USB/XLR dynamic microphone
 //!
-//! All devices use the same packet framing, CRC algorithm, and command
+//! These four devices use the same packet framing, CRC algorithm, and command
 //! class structure. Feature addresses and encodings differ between models.
 //!
 //! Packet structure (64 bytes total, written via hidapi):
@@ -177,6 +178,9 @@
 //!   LED pulsing theme:[0x0C, 0x00, 0xA6] — 1 byte: 0x00=Shure, 0x01=Custom.
 //!                                           Note: [0x00, 0xA6] aliases FEAT_LOCK — do not GET.
 
+#[path = "protocol/mv7.rs"]
+pub mod mv7;
+
 pub const VID: u16 = 0x14ED;
 /// MVX2U Gen 1: XLR-to-USB audio interface.
 pub const PID: u16 = 0x1013;
@@ -186,6 +190,8 @@ pub const MVX2U_GEN2_PID: u16 = 0x1033;
 pub const MV6_PID: u16 = 0x1026;
 /// MV7+: USB/XLR dynamic microphone.
 pub const MV7_PLUS_PID: u16 = 0x1019;
+/// Original MV7: uses the ASCII console protocol.
+pub const MV7_PID: u16 = 0x1012;
 
 /// Which Shure device model is connected. Drives capability decisions
 /// throughout the app (which controls to show, gain max, etc.).
@@ -194,6 +200,7 @@ pub enum DeviceModel {
     Mvx2u,
     Mvx2uGen2,
     Mv6,
+    Mv7,
     /// USB/XLR dynamic microphone. All SET commands use HDR_CONSTANT=0x00.
     Mv7Plus,
 }
@@ -203,7 +210,7 @@ impl DeviceModel {
     pub fn max_gain_db(&self) -> u8 {
         match self {
             DeviceModel::Mvx2u | DeviceModel::Mvx2uGen2 => 60,
-            DeviceModel::Mv6 | DeviceModel::Mv7Plus => 36,
+            DeviceModel::Mv6 | DeviceModel::Mv7 | DeviceModel::Mv7Plus => 36,
         }
     }
 
@@ -213,6 +220,7 @@ impl DeviceModel {
             DeviceModel::Mvx2u => "Shure MVX2U",
             DeviceModel::Mvx2uGen2 => "Shure MVX2U Gen 2",
             DeviceModel::Mv6 => "Shure MV6",
+            DeviceModel::Mv7 => "Shure MV7",
             DeviceModel::Mv7Plus => "Shure MV7+",
         }
     }
@@ -382,6 +390,7 @@ const PHANTOM_OFF: u8 = 0x00;
 // model remain at their default values and are not sent to the device.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceState {
+    pub mv7: Mv7Settings,
     /// Manual gain in dB. MVX2U range: 0–60. MV6 range: 0–36.
     /// Defaults to 36 dB (MVX2U factory default; also MV6 maximum).
     pub gain_db: u8,
@@ -476,6 +485,7 @@ pub struct DeviceState {
 impl Default for DeviceState {
     fn default() -> Self {
         Self {
+            mv7: Mv7Settings::default(),
             gain_db: 36,
             mode: InputMode::Auto,
             auto_position: MicPosition::Near,
@@ -520,6 +530,16 @@ impl Default for DeviceState {
             factory_serial: String::from("Unknown"),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Mv7Settings {
+    pub high_pass: bool,
+    pub presence: bool,
+    pub monitor_volume_db: i8,
+    pub monitor_muted: bool,
+    pub live_meters: bool,
+    pub dim_leds: bool,
 }
 
 impl DeviceState {

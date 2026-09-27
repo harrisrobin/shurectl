@@ -69,6 +69,9 @@ src/
 └── ui.rs         — ratatui TUI rendering (all 5 tabs + help overlay)
 ```
 
+The original MV7 ASCII command adapter lives in `src/protocol/mv7.rs`. Do not run the
+binary-protocol probe on an original MV7.
+
 All USB HID command byte values, feature addresses, and packet structure details are documented inline in `src/protocol.rs`.
 
 ---

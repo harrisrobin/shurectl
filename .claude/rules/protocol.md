@@ -1,11 +1,17 @@
 ---
 paths:
   - "src/protocol.rs"
+  - "src/protocol/mv7.rs"
   - "src/device.rs"
   - "src/bin/probe.rs"
 ---
 
 # USB HID Protocol
+
+Original MV7 (`14ed:1012`) is the exception: `protocol/mv7.rs` implements ASCII
+commands in unnumbered 64-byte reports (65 bytes for hidapi writes). No CRC,
+sequence byte, CONFIRM, or DSP reboot. Match replies and reject device errors.
+The binary framing below applies only to the other four models.
 
 Every packet is exactly 64 bytes (65 with hidapi's report-ID byte 0), sent via `hid_write()`
 / `hid_read()` on `/dev/hidrawN`. Not the USB audio class interface, and not

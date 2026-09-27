@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Gauge, Padding, Paragraph, Tabs},
+    widgets::{Block, BorderType, Borders, Clear, Gauge, Padding, Paragraph, Tabs, Wrap},
 };
 
 use crate::app::{App, Focus, Tab};
@@ -139,8 +139,10 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .copied()
         .filter(|t| {
-            let permanently_locked = matches!(t, Tab::Reverb | Tab::Led)
-                && app.device_model != crate::protocol::DeviceModel::Mv7Plus;
+            let permanently_locked = (*t == Tab::Reverb
+                && app.device_model != DeviceModel::Mv7Plus)
+                || (*t == Tab::Led
+                    && !matches!(app.device_model, DeviceModel::Mv7 | DeviceModel::Mv7Plus));
             !permanently_locked
         })
         .collect();
@@ -246,8 +248,12 @@ fn draw_main_left(f: &mut Frame, app: &App, area: Rect) {
         (DeviceModel::Mv6, InputMode::Auto) => draw_main_left_mv6_auto(f, app, area),
         (DeviceModel::Mvx2uGen2, InputMode::Manual) => draw_main_left_gen2_manual(f, app, area),
         (DeviceModel::Mvx2uGen2, InputMode::Auto) => draw_main_left_gen2_auto(f, app, area),
-        (DeviceModel::Mvx2u, InputMode::Auto) => draw_main_left_auto(f, app, area),
-        (DeviceModel::Mvx2u, InputMode::Manual) => draw_main_left_manual(f, app, area),
+        (DeviceModel::Mvx2u | DeviceModel::Mv7, InputMode::Auto) => {
+            draw_main_left_auto(f, app, area)
+        }
+        (DeviceModel::Mvx2u | DeviceModel::Mv7, InputMode::Manual) => {
+            draw_main_left_manual(f, app, area)
+        }
     }
 }
 
@@ -557,11 +563,23 @@ fn draw_main_left_manual(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(3), // gain gauge (1 bar + 2 borders)
             Constraint::Length(4), // level meter (bar + ruler + 2 borders)
             Constraint::Length(3), // monitor mix (1 bar + 2 borders)
-            Constraint::Length(3), // phantom     (1 line + 2 borders)
-            Constraint::Length(3), // lock        (1 line + 2 borders)
+            Constraint::Length(if app.device_model == DeviceModel::Mv7 {
+                0
+            } else {
+                3
+            }), // phantom     (1 line + 2 borders)
+            Constraint::Length(if app.device_model == DeviceModel::Mv7 {
+                0
+            } else {
+                3
+            }), // lock        (1 line + 2 borders)
             Constraint::Min(0),    // spacer
         ])
-        .margin(1)
+        .margin(if app.device_model == DeviceModel::Mv7 {
+            0
+        } else {
+            1
+        })
         .split(area);
 
     draw_mode_block(f, app, rows[0]);
@@ -617,14 +635,30 @@ fn draw_main_left_auto(f: &mut Frame, app: &App, area: Rect) {
         .constraints([
             Constraint::Length(3), // mode          (1 line + 2 borders)
             Constraint::Length(3), // mute          (1 line + 2 borders)
-            Constraint::Length(7), // auto controls (3 rows + 2 borders + header)
+            Constraint::Length(if app.device_model == DeviceModel::Mv7 {
+                4
+            } else {
+                7
+            }), // auto controls (3 rows + 2 borders + header)
             Constraint::Length(4), // level meter   (bar + ruler + 2 borders)
             Constraint::Length(3), // monitor mix   (1 bar + 2 borders)
-            Constraint::Length(3), // phantom       (1 line + 2 borders)
-            Constraint::Length(3), // lock          (1 line + 2 borders)
+            Constraint::Length(if app.device_model == DeviceModel::Mv7 {
+                0
+            } else {
+                3
+            }), // phantom       (1 line + 2 borders)
+            Constraint::Length(if app.device_model == DeviceModel::Mv7 {
+                0
+            } else {
+                3
+            }), // lock          (1 line + 2 borders)
             Constraint::Min(0),    // spacer
         ])
-        .margin(1)
+        .margin(if app.device_model == DeviceModel::Mv7 {
+            0
+        } else {
+            1
+        })
         .split(area);
 
     draw_mode_block(f, app, rows[0]);
@@ -646,12 +680,19 @@ fn draw_auto_controls(f: &mut Frame, app: &App, area: Rect) {
 
     let inner_rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // Mic Position
-            Constraint::Length(1), // Tone
-            Constraint::Length(1), // Auto Gain
+        .constraints(vec![
+            Constraint::Length(1);
+            if app.device_model == DeviceModel::Mv7 {
+                2
+            } else {
+                3
+            }
         ])
-        .margin(1)
+        .margin(if app.device_model == DeviceModel::Mv7 {
+            0
+        } else {
+            1
+        })
         .split(
             Block::default()
                 .borders(Borders::ALL)
@@ -711,6 +752,10 @@ fn draw_auto_controls(f: &mut Frame, app: &App, area: Rect) {
         ])),
         inner_rows[1],
     );
+
+    if app.device_model == DeviceModel::Mv7 {
+        return;
+    }
 
     // ── Auto Gain row ─────────────────────────────────────────────────────────
     let gain = &app.device_state.auto_gain;
@@ -968,9 +1013,16 @@ fn draw_main_shared(f: &mut Frame, app: &App, rows: &[Rect]) {
     draw_monitor_mix_gauge(f, app, rows[1]);
 
     // ── Phantom Power ─────────────────────────────────────────────────────────
-    draw_phantom_block(f, app, rows[2]);
+    if app.device_model != DeviceModel::Mv7 {
+        draw_phantom_block(f, app, rows[2]);
+    }
 
-    // ── Config Lock ───────────────────────────────────────────────────────────
+    if app.device_model != DeviceModel::Mv7 {
+        draw_config_lock(f, app, rows[3]);
+    }
+}
+
+fn draw_config_lock(f: &mut Frame, app: &App, area: Rect) {
     let lock_focused = app.focus == Focus::Lock;
     let locked = app.device_state.locked;
     let lock_icon = if locked { "🔒" } else { "🔓" };
@@ -1022,19 +1074,79 @@ fn draw_main_shared(f: &mut Frame, app: &App, rows: &[Rect]) {
                 },
             )),
     );
-    f.render_widget(lock_p, rows[3]);
+    f.render_widget(lock_p, area);
+}
+
+fn draw_mv7_switches(f: &mut Frame, app: &App, area: Rect, controls: &[(Focus, &str, bool, &str)]) {
+    let columns = Layout::horizontal(vec![Constraint::Fill(1); controls.len()])
+        .margin(1)
+        .split(area);
+    for ((focus, title, value, description), column) in controls.iter().zip(columns.iter()) {
+        draw_toggle_card(
+            f,
+            app.focus == *focus,
+            title,
+            "Status: ",
+            *value,
+            &[*description],
+            *column,
+        );
+    }
+}
+
+fn draw_mv7_headphones(f: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(9),
+        Constraint::Min(0),
+    ])
+    .margin(1)
+    .split(area);
+    draw_config_lock(f, app, rows[0]);
+    let db = app.device_state.mv7.monitor_volume_db;
+    let focused = app.focus == Focus::Mv7MonitorVolume;
+    f.render_widget(
+        Gauge::default()
+            .block(card_block("Headphone Volume", focused))
+            .gauge_style(Style::default().fg(C_ACCENT))
+            .ratio(f64::from(db.clamp(-24, 0) + 24) / 24.0)
+            .label(format!("{db} dB  [←→] adjust")),
+        rows[1],
+    );
+    draw_toggle_card(
+        f,
+        app.focus == Focus::Mv7MonitorMute,
+        "Headphone Mute",
+        "Muted: ",
+        app.device_state.mv7.monitor_muted,
+        &[
+            "Affects headphones only.",
+            "USB microphone audio stays active.",
+        ],
+        rows[2],
+    );
+    f.render_widget(Paragraph::new("Auto Level: choose Near or Far and a tone.\n\nManual: set Gain, EQ and Dynamics.\n\nUnlock Config Lock to adjust settings.")
+        .wrap(Wrap { trim: true }).style(Style::default().fg(C_DIM)), rows[3]);
 }
 
 fn draw_main_right(f: &mut Frame, app: &App, area: Rect) {
+    if app.device_model == DeviceModel::Mv7 {
+        draw_mv7_headphones(f, app, area);
+        return;
+    }
     let ds = &app.device_state;
 
     let lines = match app.device_model {
+        DeviceModel::Mv7 => Vec::new(),
         DeviceModel::Mvx2u => {
             let mode_specific_lines: Vec<Line> = match ds.mode {
-                InputMode::Manual => vec![Line::from(vec![
-                    Span::styled("Gain        : ", Style::default().fg(C_DIM)),
-                    Span::styled(format!("{} dB", ds.gain_db), Style::default().fg(C_TEXT)),
-                ])],
+                InputMode::Manual => {
+                    vec![Line::from(vec![
+                        Span::styled("Gain        : ", Style::default().fg(C_DIM)),
+                        Span::styled(format!("{} dB", ds.gain_db), Style::default().fg(C_TEXT)),
+                    ])]
+                }
                 InputMode::Auto => vec![
                     Line::from(vec![
                         Span::styled("Position    : ", Style::default().fg(C_DIM)),
@@ -2118,6 +2230,32 @@ fn render_notice(f: &mut Frame, area: Rect, lines: Vec<Line>) {
 // EQ Tab
 // ─────────────────────────────────────────────────────────────────────────────
 fn draw_eq_tab(f: &mut Frame, app: &App, area: Rect) {
+    if app.device_model == DeviceModel::Mv7 {
+        if app.device_state.mode == InputMode::Auto {
+            draw_tab_locked_notice(f, area, "EQ");
+        } else {
+            draw_mv7_switches(
+                f,
+                app,
+                area,
+                &[
+                    (
+                        Focus::Mv7HighPass,
+                        "High-pass Filter",
+                        app.device_state.mv7.high_pass,
+                        "Reduces low-frequency rumble.",
+                    ),
+                    (
+                        Focus::Mv7Presence,
+                        "Presence Boost",
+                        app.device_state.mv7.presence,
+                        "Adds vocal clarity.",
+                    ),
+                ],
+            );
+        }
+        return;
+    }
     if app.device_model == DeviceModel::Mv6 || app.device_model == DeviceModel::Mv7Plus {
         draw_mv6_eq_tab(f, app, area);
         return;
@@ -2488,6 +2626,28 @@ fn draw_led_cycle_row(f: &mut Frame, focused: bool, label: &str, value: &str, ar
 }
 
 fn draw_led_tab(f: &mut Frame, app: &App, area: Rect) {
+    if app.device_model == DeviceModel::Mv7 {
+        draw_mv7_switches(
+            f,
+            app,
+            area,
+            &[
+                (
+                    Focus::Mv7LiveMeters,
+                    "Live Meters",
+                    app.device_state.mv7.live_meters,
+                    "Shows input level on the mic.",
+                ),
+                (
+                    Focus::Mv7DimLeds,
+                    "Dim LEDs",
+                    app.device_state.mv7.dim_leds,
+                    "Dims the touch panel lights.",
+                ),
+            ],
+        );
+        return;
+    }
     let ds = &app.device_state;
 
     let custom_color_zones: usize = match ds.led_behavior {
@@ -2728,13 +2888,22 @@ fn draw_dynamics_tab(f: &mut Frame, app: &App, area: Rect) {
     }
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(vec![Constraint::Ratio(1, 3); 3])
+        .constraints(vec![
+            Constraint::Fill(1);
+            if app.device_model == DeviceModel::Mv7 {
+                2
+            } else {
+                3
+            }
+        ])
         .margin(1)
         .split(area);
 
     draw_limiter_card(f, app, cols[0]);
     draw_compressor_card(f, app, cols[1]);
-    draw_hpf_card(f, app, cols[2]);
+    if app.device_model != DeviceModel::Mv7 {
+        draw_hpf_card(f, app, cols[2]);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2931,6 +3100,7 @@ fn draw_info_tab(f: &mut Frame, app: &App, area: Rect) {
         DeviceModel::Mvx2u => ("14ED:1013", "0–60 dB"),
         DeviceModel::Mvx2uGen2 => ("14ED:1033", "0–60 dB"),
         DeviceModel::Mv6 => ("14ED:1026", "0–36 dB"),
+        DeviceModel::Mv7 => ("14ED:1012", "0–36 dB"),
         DeviceModel::Mv7Plus => ("14ED:1019", "0–36 dB"),
     };
 
@@ -2996,6 +3166,16 @@ fn draw_info_tab(f: &mut Frame, app: &App, area: Rect) {
     ]);
 
     let cap_rows: &[(&str, &str)] = match model {
+        DeviceModel::Mv7 => &[
+            ("  Auto Level   : ", "Near / Far; Natural / Dark / Bright"),
+            ("  EQ           : ", "High-pass Filter / Presence Boost"),
+            ("  Compressor   : ", "Off / Light / Medium / Heavy"),
+            ("  Limiter      : ", "On / Off"),
+            ("  Monitor Mix  : ", "0–100%"),
+            ("  Headphones   : ", "-24 to 0 dB / Mute"),
+            ("  Config Lock  : ", "On / Off"),
+            ("  LED Panel    : ", "Live Meters / Dim LEDs"),
+        ],
         DeviceModel::Mvx2u => &[
             ("  Phantom Pwr  : ", "48V"),
             ("  EQ           : ", "5-band parametric"),
@@ -3256,6 +3436,80 @@ mod tests {
     // Single source of truth for the ▶ marker on every Enter-cycled control
     // (HPF, Compressor, Reverb Type) across all four models, so a bug here is a
     // bug on every Dynamics and Reverb tab at once.
+
+    fn rendered(app: &App) -> String {
+        rendered_at(app, 120, 45)
+    }
+
+    fn rendered_at(app: &App, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn mv7_main_controls_remain_visible_in_an_80_by_24_terminal() {
+        let mut app = App {
+            device_model: DeviceModel::Mv7,
+            demo_mode: true,
+            ..App::default()
+        };
+        for mode in [InputMode::Auto, InputMode::Manual] {
+            app.device_state.mode = mode;
+            let text = rendered_at(&app, 80, 24);
+            for label in [
+                "Input Mode",
+                "Mute",
+                "Monitor Mix",
+                "Config Lock",
+                "Headphone Volume",
+                "Headphone Mute",
+            ] {
+                assert!(text.contains(label), "Missing {label} in {mode:?}");
+            }
+            if mode == InputMode::Auto {
+                assert!(text.contains("Tone:"));
+                assert!(text.contains("Mic Position:"));
+            } else {
+                assert!(text.contains("GAIN"));
+            }
+        }
+    }
+
+    #[test]
+    fn mv7_renders_its_controls_and_hides_unsupported_features() {
+        let mut app = App {
+            device_model: DeviceModel::Mv7,
+            demo_mode: true,
+            ..App::default()
+        };
+        for mode in [InputMode::Auto, InputMode::Manual] {
+            app.device_state.mode = mode;
+            for (tab, required) in [
+                (Tab::Main, "Headphone Volume"),
+                (Tab::Led, "Live Meters"),
+                (Tab::Info, "14ED:1012"),
+            ] {
+                app.active_tab = tab;
+                let text = rendered(&app);
+                assert!(text.contains(required), "Missing {required}");
+                for unsupported in ["Phantom", "48V", "Reverb", "Denoiser", "5-band"] {
+                    assert!(!text.contains(unsupported), "Unexpected {unsupported}");
+                }
+            }
+        }
+        app.active_tab = Tab::Eq;
+        assert!(rendered(&app).contains("Presence Boost"));
+        app.device_state.mode = InputMode::Auto;
+        assert!(!rendered(&app).contains("Presence Boost"));
+    }
 
     #[test]
     fn enum_options_marks_exactly_the_current_variant() {

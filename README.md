@@ -10,6 +10,7 @@ An open-source terminal UI configurator for Shure USB audio interfaces and micro
 - MVX2U Gen 1 — Digital Audio Interface
 - MVX2U Gen 2 — Digital Audio Interface
 - MV6 — USB Gaming Microphone
+- MV7 — Original USB/XLR Dynamic Microphone (`14ed:1012`)
 - MV7+ — USB/XLR Dynamic Microphone
 
 ---
@@ -21,7 +22,7 @@ An open-source terminal UI configurator for Shure USB audio interfaces and micro
 - **Mic Mute** — toggle mute
 - **Monitor Mix** — mic vs. playback blend slider
 - **Compressor** — Off / Light / Medium / Heavy
-- **High-Pass Filter** — Off / 75 Hz / 150 Hz
+- **High-Pass Filter** — Off / 75 Hz / 150 Hz; original MV7 uses an on/off filter
 - **Real-time Level Meter** — dBFS input meter with peak-hold display
 - **4 Preset Slots** — save and load named presets stored as TOML in `~/.config/shurectl/presets/`
 - **Device Info** — factory serial number, device name, and firmware version
@@ -49,6 +50,27 @@ An open-source terminal UI configurator for Shure USB audio interfaces and micro
 - **Popper Stopper** — enable/disable
 - **Mute Button Disable** — prevent accidental mutes
 - **Gain Lock** — hardware freeze of the gain control (Manual mode only)
+
+### Original MV7
+- **Manual gain** — 0–36 dB in 1 dB steps
+- **Auto Level** — Near/Far distance and Natural/Dark/Bright tone
+- **EQ** — independent High-pass Filter and Presence Boost switches
+- **Dynamics** — limiter and Off/Light/Medium/Heavy compressor in Manual mode
+- **Headphones** — monitor mix, volume (−24 to 0 dB), and separate headphone mute
+- **Config Lock** — unlock before changing settings or loading presets
+- **LED Panel** — Live Meters and Dim LEDs
+
+Run `shurectl --demo mv7` to explore these controls without hardware. EQ and Dynamics
+are unavailable in Auto Level mode. There is no phantom power, five-band EQ,
+gain-environment selector, denoiser, reverb, or RGB lighting on this model.
+
+Original MV7 settings are read back after changes. A failed read disables further
+changes until `r` successfully refreshes the device. Loading a preset applies the
+active mode's controls; Auto Level leaves the remembered manual gain untouched.
+Older presets without an MV7 section preserve headphone and LED settings.
+
+Tested on an original MV7 running firmware `0.0.52.0` on macOS with a USB connection.
+Linux and Windows hardware behavior has not been verified for this model.
 
 ### MV7+ - Builds on MV6 features with the following
 - **Reverb** — output and monitor enable/disable; Type: Plate / Hall / Studio; Intensity: 0–100%
@@ -130,6 +152,7 @@ Create `/etc/udev/rules.d/62-shure.rules`:
 ACTION!="remove", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="14ed", ATTRS{idProduct}=="1013", TAG+="uaccess"
 ACTION!="remove", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="14ed", ATTRS{idProduct}=="1033", TAG+="uaccess"
 ACTION!="remove", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="14ed", ATTRS{idProduct}=="1026", TAG+="uaccess"
+ACTION!="remove", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="14ed", ATTRS{idProduct}=="1012", TAG+="uaccess"
 ACTION!="remove", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="14ed", ATTRS{idProduct}=="1019", TAG+="uaccess"
 ```
 
@@ -181,7 +204,7 @@ shurectl --mute off              # Unmute
 | `←` / `h` | Decrease value |
 | `→` / `l` | Increase value |
 | `Enter` / `Space` | Toggle boolean / cycle option |
-| `f` | Flatten EQ (zero all bands) — EQ tab, Gen 1 and Gen 2 only |
+| `f` | Flatten EQ — zero bands on Gen 1/Gen 2; turn both filters off on original MV7 (Manual mode) |
 | `r` | Refresh state from device |
 | `s` | Save preset (on Presets tab, focused slot) |
 | `d` | Delete preset (on Presets tab, focused slot) |
@@ -227,12 +250,37 @@ on the device itself, not the OS capture volume level. Both can be set independe
 
 ---
 
+## Original MV7 protocol
+
+The original MV7 uses an ASCII command console on the vendor HID interface
+(usage page `0xFF00`). Each command is NUL-terminated in a 64-byte payload, preceded
+by report ID zero for hidapi writes. It does **not** use the other models' binary
+framing, CRC, or SET/CONFIRM packets. Connecting selects `su adm` without rebooting
+its DSP. Firmware-update and raw memory commands are not implemented.
+
+| Setting | Commands / blocks |
+| --- | --- |
+| Mode, gain, microphone mute, configuration lock | `dspMode`, `inputGain`, `micMute`, `lock` |
+| Headphone mute and volume, panel LEDs | `audioMute`, `volume`, `meterMode`, `dimMode` |
+| Monitor mix, compressor, limiter | Blocks `22`, `19`, `1F` |
+| High-pass/presence switches, Auto Level profile | Blocks `31`, `34` |
+
+Replies are matched to the requested property, validated, and bounded by a three-second
+timeout. All six Auto Level profiles (`dspMode=2` through `7`) are accepted. Gain is
+readable in Auto mode but can only be changed in Manual mode. The reported MV7 serial
+comes from `serialNum`, the device's silicon identifier.
+
 ## Acknowledgements
 
 Initial protocol reverse-engineering credit goes to **PennRobotics** and the
 [shux project](https://gitlab.com/PennRobotics/shux) (Apache 2.0), without which
 this tool would not exist. If you find shurectl useful, consider starring their
 repository.
+
+Original MV7 protocol references: [mv7config](https://github.com/matteodelabre/mv7config),
+[OpenMV7](https://github.com/vladikk/openmv7), and the
+[MV7 vendor HID protocol documentation](https://github.com/schlarpc/shure-mv7-firmware-re/blob/main/hid-protocol.md).
+The original MV7 command behavior was also verified directly on connected hardware.
 
 ---
 

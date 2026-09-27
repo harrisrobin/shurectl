@@ -29,6 +29,9 @@ pub const PRESET_COUNT: usize = 4;
 /// device model remain at their serde defaults and are not applied to the device.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PresetSlot {
+    /// Absent in older presets; preserve headphone and panel settings in that case.
+    #[serde(default)]
+    pub mv7: Option<SerMv7Settings>,
     /// Human-readable name shown in the TUI (editable in-app or by hand in TOML).
     pub name: String,
 
@@ -108,6 +111,42 @@ pub struct PresetSlot {
     pub led_live_interior_rgb: [u8; 3],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SerMv7Settings {
+    pub high_pass: bool,
+    pub presence: bool,
+    pub monitor_volume_db: i8,
+    pub monitor_muted: bool,
+    pub live_meters: bool,
+    pub dim_leds: bool,
+}
+
+impl From<crate::protocol::Mv7Settings> for SerMv7Settings {
+    fn from(value: crate::protocol::Mv7Settings) -> Self {
+        Self {
+            high_pass: value.high_pass,
+            presence: value.presence,
+            monitor_volume_db: value.monitor_volume_db,
+            monitor_muted: value.monitor_muted,
+            live_meters: value.live_meters,
+            dim_leds: value.dim_leds,
+        }
+    }
+}
+
+impl From<SerMv7Settings> for crate::protocol::Mv7Settings {
+    fn from(value: SerMv7Settings) -> Self {
+        Self {
+            high_pass: value.high_pass,
+            presence: value.presence,
+            monitor_volume_db: value.monitor_volume_db,
+            monitor_muted: value.monitor_muted,
+            live_meters: value.live_meters,
+            dim_leds: value.dim_leds,
+        }
+    }
+}
+
 fn default_popper_stopper() -> bool {
     true
 }
@@ -140,6 +179,7 @@ impl PresetSlot {
     /// Build a preset snapshot from a live `DeviceState`.
     pub fn from_device_state(name: impl Into<String>, state: &DeviceState) -> Self {
         Self {
+            mv7: Some(state.mv7.into()),
             name: name.into(),
             gain_db: state.gain_db,
             mode: SerInputMode::from(state.mode),
@@ -180,6 +220,9 @@ impl PresetSlot {
     /// Apply this preset's settings onto a `DeviceState`, preserving
     /// hardware-identity fields (`serial_number`).
     pub fn apply_to_device_state(&self, state: &mut DeviceState) {
+        if let Some(mv7) = self.mv7 {
+            state.mv7 = mv7.into();
+        }
         state.gain_db = self.gain_db;
         state.mode = InputMode::from(self.mode);
         state.muted = self.muted;
@@ -237,7 +280,9 @@ impl PresetSlot {
     fn tone_str(&self) -> String {
         match self.tone {
             0 => "Natural".to_string(),
-            t if t > 0 => format!("{}% Bright", t as i32 * 10),
+            t if t > 0 => {
+                format!("{}% Bright", t as i32 * 10)
+            }
             t => format!("{}% Dark", (t as i32 * 10).abs()),
         }
     }
@@ -254,6 +299,18 @@ impl PresetSlot {
         };
 
         match model {
+            DeviceModel::Mv7 => match InputMode::from(self.mode) {
+                InputMode::Auto => format!(
+                    "Auto · {} · {}",
+                    MicPosition::from(self.auto_position),
+                    AutoTone::from(self.auto_tone)
+                ),
+                InputMode::Manual => format!(
+                    "Manual · {}dB · Comp: {}",
+                    self.gain_db,
+                    CompressorPreset::from(self.compressor)
+                ),
+            },
             DeviceModel::Mv6 => {
                 let denoiser_str = self.denoiser_str();
                 let popper_str = self.popper_str();
@@ -368,7 +425,9 @@ pub fn load_preset(index: usize) -> Result<Option<PresetSlot>> {
     let path = preset_path(index)?;
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
         Err(e) => {
             return Err(e)
                 .with_context(|| format!("Failed to read preset file: {}", path.display()));
@@ -872,6 +931,34 @@ mod tests {
         let text = toml::to_string_pretty(slot).expect("serialise");
         std::fs::write(&path, &text).expect("write");
         toml::from_str(&std::fs::read_to_string(&path).expect("read")).expect("deserialise")
+    }
+
+    #[test]
+    fn mv7_presets_roundtrip_settings_without_overwriting_identity_or_lock() {
+        let mut original = DeviceState::default();
+        original.mv7 = crate::protocol::Mv7Settings {
+            high_pass: true,
+            presence: true,
+            monitor_volume_db: -7,
+            monitor_muted: true,
+            live_meters: true,
+            dim_leds: true,
+        };
+        let preset = PresetSlot::from_device_state("MV7", &original);
+        let encoded = toml::to_string(&preset).unwrap();
+        let decoded: PresetSlot = toml::from_str(&encoded).unwrap();
+        let mut target = DeviceState::default();
+        target.locked = true;
+        target.factory_serial = "TEST-SERIAL".into();
+        decoded.apply_to_device_state(&mut target);
+        assert_eq!(target.mv7, original.mv7);
+        assert!(target.locked);
+        assert_eq!(target.factory_serial, "TEST-SERIAL");
+        let mut legacy = decoded;
+        legacy.mv7 = None;
+        let decoded: PresetSlot = toml::from_str(&toml::to_string(&legacy).unwrap()).unwrap();
+        decoded.apply_to_device_state(&mut target);
+        assert_eq!(target.mv7, original.mv7);
     }
 
     #[test]

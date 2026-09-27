@@ -1,6 +1,6 @@
 # shurectl
 
-Terminal UI configurator for Shure USB audio interfaces (MVX2U Gen 1/Gen 2, MV6, MV7+) on
+Terminal UI configurator for Shure USB audio interfaces (MVX2U Gen 1/Gen 2, MV6, MV7, MV7+) on
 Linux and macOS. Talks to the device directly over USB HID, replacing the Windows/Mac-only
 ShurePlus MOTIV Desktop app. Single-crate Rust binary. Prefer the simple, obvious solution
 over clever abstractions.
@@ -13,7 +13,7 @@ loads these automatically.
 ## Commands
 
 ```
-cargo run -- --demo mv7plus     # no hardware; also mvx2u, mvx2u-gen2, mv6
+cargo run -- --demo mv7plus     # no hardware; also mvx2u, mvx2u-gen2, mv6, mv7
 cargo run -- --list             # list connected devices
 ```
 
@@ -53,7 +53,7 @@ src/
 **Layering rules (strict):**
 - `apply_action()` in `main.rs` is the *only* place that writes to the device. Never call
   `device.rs` from `ui.rs` or `app.rs`.
-- Raw protocol byte values live *only* in `protocol.rs` as named constants.
+- Raw protocol byte values live *only* in `protocol.rs` and `protocol/mv7.rs` as named constants.
 - `shurectl-probe` must never ship to end users via `cargo install` or Homebrew.
 - Never write firmware-update packets. Those byte sequences are intentionally omitted (see
   the readme legal section).
@@ -133,7 +133,7 @@ Shared across all models unless the hardware makes it impossible:
 4. Update *every* `DeviceModel` match: focus fns, both `draw_main_*`, `draw_info_tab()`, and
    preset serialization. Wherever `_` was used, a missing arm is a silent UX divergence
    rather than a compile error.
-5. Verify with `--demo mvx2u`, `--demo mvx2u-gen2`, `--demo mv6`, and `--demo mv7plus`.
+5. Verify with `--demo mvx2u`, `--demo mvx2u-gen2`, `--demo mv6`, `--demo mv7`, and `--demo mv7plus`.
 
 **Antipatterns:**
 
@@ -163,7 +163,7 @@ Shared across all models unless the hardware makes it impossible:
 | New protocol command | Roundtrip test in `protocol.rs` first |
 | Packet encoding changes | Test CRC correctness and 64-byte length invariant |
 | State decode changes | Test `apply_response()` with hand-crafted response buffers |
-| Focus/navigation changes | Manual test in `--demo` for all four models |
+| Focus/navigation changes | Manual test in `--demo` for all five models |
 | `main()` / CLI args | No tests |
 
 Performance is not a concern (~100 ms input-driven tick). No benchmarks unless a specific

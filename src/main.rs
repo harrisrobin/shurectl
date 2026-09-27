@@ -77,7 +77,7 @@ impl std::str::FromStr for MuteAction {
 )]
 struct Cli {
     /// Run in demo mode without a real device.
-    /// Optionally specify which device model to simulate: mvx2u (default), mvx2u-gen2, mv6, mv7plus.
+    /// Optionally specify which device model to simulate: mvx2u (default), mvx2u-gen2, mv6, mv7, mv7plus.
     #[arg(long, short, num_args = 0..=1, default_missing_value = "mvx2u", value_name = "MODEL")]
     demo: Option<String>,
 
@@ -180,6 +180,9 @@ fn main() -> Result<()> {
                 ));
             }
             Err(e) => {
+                if dev.model == DeviceModel::Mv7 {
+                    return Err(e.context("Cannot load MV7 settings"));
+                }
                 app.set_err(format!("Connected but failed to read state: {e}"));
             }
         }
@@ -254,10 +257,11 @@ fn parse_demo_model(s: &str) -> Result<DeviceModel> {
         "mvx2u" => Ok(DeviceModel::Mvx2u),
         "mvx2u-gen2" | "mvx2ugen2" => Ok(DeviceModel::Mvx2uGen2),
         "mv6" => Ok(DeviceModel::Mv6),
+        "mv7" => Ok(DeviceModel::Mv7),
         "mv7plus" | "mv7+" => Ok(DeviceModel::Mv7Plus),
         other => {
             anyhow::bail!(
-                "unknown demo model \"{other}\". Valid options: mvx2u, mvx2u-gen2, mv6, mv7plus"
+                "unknown demo model \"{other}\". Valid options: mvx2u, mvx2u-gen2, mv6, mv7, mv7plus"
             )
         }
     }
@@ -390,7 +394,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Option<Device
                 app.editing_preset_index = i;
                 return None;
             }
-            if app.focus == app::Focus::FactoryReset {
+            if app.focus == app::Focus::FactoryReset && app.device_model == DeviceModel::Mv7Plus {
                 app.confirming_factory_reset = true;
                 app.set_err(
                     "! This will erase all device settings. Press Enter to confirm, any other key to cancel.",
@@ -406,7 +410,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Option<Device
                 None
             }
         }
-        KeyCode::Char('f') if app.active_tab == app::Tab::Eq => Some(DeviceAction::FlattenEq),
+        KeyCode::Char('f')
+            if app.active_tab == app::Tab::Eq && !app.is_tab_locked(app::Tab::Eq) =>
+        {
+            Some(DeviceAction::FlattenEq)
+        }
         KeyCode::Char('d') | KeyCode::Delete if app.active_tab == app::Tab::Presets => {
             if let app::Focus::PresetActions(i) = app.focus {
                 if app.presets[i].is_some() {
@@ -423,7 +431,57 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Option<Device
 }
 
 fn apply_action(app: &mut App, device: &Option<ShureDevice>, action: DeviceAction) {
+    let refresh_mv7 = app.device_model == DeviceModel::Mv7
+        && !matches!(
+            action,
+            DeviceAction::SavePreset(_)
+                | DeviceAction::DeletePreset(_)
+                | DeviceAction::PersistPresetName(_)
+        );
+    if refresh_mv7 && !app.mv7_state_valid && !matches!(action, DeviceAction::Refresh) {
+        app.set_err("MV7 state unavailable. Press r to refresh before changing settings.");
+        return;
+    }
+    if app.device_model == DeviceModel::Mv7
+        && matches!(
+            action,
+            DeviceAction::SavePreset(_) | DeviceAction::LoadPreset(_)
+        )
+        && let Some(dev) = device
+    {
+        match dev.get_state() {
+            Ok(state) => {
+                app.device_state = state;
+                app.mv7_state_valid = true;
+            }
+            Err(e) => {
+                app.mv7_state_valid = false;
+                app.set_err(format!("Cannot read current MV7 settings: {e}"));
+                return;
+            }
+        }
+    }
     let result = match &action {
+        DeviceAction::SetMv7Eq(high_pass, presence) => {
+            app.set_ok("EQ updated.");
+            send_if_connected(device, |d| d.set_mv7_eq(*high_pass, *presence))
+        }
+        DeviceAction::SetMv7MonitorVolume(db) => {
+            app.set_ok(format!("Headphone Volume → {db} dB"));
+            send_if_connected(device, |d| d.set_mv7_monitor_volume(*db))
+        }
+        DeviceAction::SetMv7MonitorMute(on) => {
+            app.set_ok("Headphone Mute updated.");
+            send_if_connected(device, |d| d.set_mv7_monitor_mute(*on))
+        }
+        DeviceAction::SetMv7LiveMeters(on) => {
+            app.set_ok("Live Meters updated.");
+            send_if_connected(device, |d| d.set_mv7_live_meters(*on))
+        }
+        DeviceAction::SetMv7DimLeds(on) => {
+            app.set_ok("Dim LEDs updated.");
+            send_if_connected(device, |d| d.set_mv7_dim_leds(*on))
+        }
         DeviceAction::Refresh => {
             if let Some(dev) = device {
                 match dev.get_state() {
@@ -508,6 +566,12 @@ fn apply_action(app: &mut App, device: &Option<ShureDevice>, action: DeviceActio
             let db = *gain_tenths as f32 / 10.0;
             app.set_ok(format!("EQ Band {} → {:+.1} dB", band + 1, db));
             send_if_connected(device, |d| d.set_eq_band_gain(*band, *gain_tenths))
+        }
+        DeviceAction::FlattenEq if app.device_model == DeviceModel::Mv7 => {
+            app.device_state.mv7.high_pass = false;
+            app.device_state.mv7.presence = false;
+            app.set_ok("EQ flattened.");
+            send_if_connected(device, |d| d.set_mv7_eq(false, false))
         }
         DeviceAction::FlattenEq => {
             for band in app.device_state.eq_bands.iter_mut() {
@@ -703,6 +767,21 @@ fn apply_action(app: &mut App, device: &Option<ShureDevice>, action: DeviceActio
         }
     };
 
+    if refresh_mv7 && let Some(dev) = device {
+        match dev.get_state() {
+            Ok(state) => {
+                app.device_state = state;
+                app.mv7_state_valid = true;
+            }
+            Err(e) => {
+                app.mv7_state_valid = false;
+                app.set_err(format!(
+                    "MV7 readback failed; displayed settings may be stale: {e}"
+                ));
+                return;
+            }
+        }
+    }
     if let Err(e) = result {
         app.set_err(format!("Device error: {e}"));
     }
@@ -726,11 +805,37 @@ fn apply_preset_to_device(
     model: DeviceModel,
 ) -> Result<()> {
     send_if_connected(device, |d| {
+        if model == DeviceModel::Mv7 {
+            anyhow::ensure!(
+                !d.get_state()?.locked,
+                "Unlock Config Lock before loading a preset"
+            );
+            d.set_mode(state.mode == InputMode::Auto)?;
+            // Mode changes reload the DSP defaults. Wait for a complete readback first.
+            d.get_state()?;
+            match state.mode {
+                InputMode::Auto => d.set_mv7_auto(state.auto_position, state.auto_tone)?,
+                InputMode::Manual => {
+                    d.set_gain(state.gain_db)?;
+                    d.set_mv7_eq(state.mv7.high_pass, state.mv7.presence)?;
+                    d.set_limiter(state.limiter_enabled)?;
+                    d.set_compressor(&state.compressor)?;
+                }
+            }
+            d.set_mute(state.muted)?;
+            d.set_monitor_mix(state.monitor_mix)?;
+            d.set_mv7_monitor_volume(state.mv7.monitor_volume_db)?;
+            d.set_mv7_monitor_mute(state.mv7.monitor_muted)?;
+            d.set_mv7_live_meters(state.mv7.live_meters)?;
+            d.set_mv7_dim_leds(state.mv7.dim_leds)?;
+            return Ok(());
+        }
         d.set_mode(state.mode == InputMode::Auto)?;
         d.set_gain(state.gain_db)?;
         d.set_mute(state.muted)?;
         d.set_hpf(&state.hpf)?;
         match model {
+            DeviceModel::Mv7 => {}
             DeviceModel::Mvx2u => {
                 d.set_auto_position(&state.auto_position)?;
                 d.set_auto_tone(&state.auto_tone)?;
