@@ -203,6 +203,16 @@ impl App {
         self.status_is_error = is_error;
     }
 
+    /// Manual DSP presets clear the device's Auto profile; retain the user's
+    /// selection for the next switch back to Auto during this session.
+    pub fn update_device_state(&mut self, mut state: DeviceState) {
+        if self.device_model == DeviceModel::Mv7 && state.mode == InputMode::Manual {
+            state.auto_position = self.device_state.auto_position;
+            state.auto_tone = self.device_state.auto_tone;
+        }
+        self.device_state = state;
+    }
+
     pub fn set_ok(&mut self, msg: impl Into<String>) {
         self.set_status(msg, false);
     }
@@ -777,10 +787,13 @@ impl App {
                 if self.device_state.mv6_gain_locked {
                     return None;
                 }
-                let max = self.device_model.max_gain_db() as i32;
-                let g = &mut self.device_state.gain_db;
-                *g = ((*g as i32) + delta).clamp(0, max) as u8;
-                Some(DeviceAction::SetGain(self.device_state.gain_db))
+                let max = i32::from(self.device_model.max_gain_db()) * 10;
+                let step = i32::from(self.device_model.gain_step_tenths());
+                let g = &mut self.device_state.gain_tenths;
+                *g = self
+                    .device_model
+                    .clamp_gain((i32::from(*g) + delta * step).clamp(0, max) as u16);
+                Some(DeviceAction::SetGain(self.device_state.gain_tenths))
             }
             Focus::MonitorMix => {
                 let m = &mut self.device_state.monitor_mix;
@@ -1148,7 +1161,7 @@ pub enum DeviceAction {
     SetMv7MonitorMute(bool),
     SetMv7LiveMeters(bool),
     SetMv7DimLeds(bool),
-    SetGain(u8),
+    SetGain(u16),
     SetMode(InputMode),
     SetAutoPosition(MicPosition),
     SetAutoTone(AutoTone),
@@ -1209,6 +1222,72 @@ pub enum DeviceAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gain_adjustment_uses_mv7_grid_without_changing_other_models() {
+        for model in [
+            DeviceModel::Mvx2u,
+            DeviceModel::Mvx2uGen2,
+            DeviceModel::Mv6,
+            DeviceModel::Mv7,
+            DeviceModel::Mv7Plus,
+        ] {
+            let mut app = App {
+                device_model: model,
+                focus: Focus::Gain,
+                ..App::default()
+            };
+            app.device_state.mode = InputMode::Manual;
+            app.device_state.gain_tenths = 330;
+            let expected = if model == DeviceModel::Mv7 { 345 } else { 340 };
+            assert!(
+                matches!(app.adjust_focused(1), Some(DeviceAction::SetGain(value)) if value == expected)
+            );
+            app.adjust_focused(-1);
+            assert_eq!(app.device_state.gain_tenths, 330);
+            app.device_state.gain_tenths = 0;
+            app.adjust_focused(-1);
+            assert_eq!(app.device_state.gain_tenths, 0);
+        }
+    }
+
+    #[test]
+    fn mv7_retains_auto_profile_through_manual_readback_and_mode_toggle() {
+        let mut app = App {
+            device_model: DeviceModel::Mv7,
+            focus: Focus::Mode,
+            ..App::default()
+        };
+        app.device_state.mode = InputMode::Auto;
+        app.device_state.auto_position = MicPosition::Far;
+        app.device_state.auto_tone = AutoTone::Bright;
+        app.toggle_focused();
+        app.update_device_state(DeviceState {
+            mode: InputMode::Manual,
+            ..DeviceState::default()
+        });
+        app.focus = Focus::Mode;
+        assert!(matches!(
+            app.toggle_focused(),
+            Some(DeviceAction::SetMode(InputMode::Auto))
+        ));
+        assert_eq!(
+            crate::protocol::mv7::cmd_mode(
+                true,
+                app.device_state.auto_position,
+                app.device_state.auto_tone
+            ),
+            "dspMode 7"
+        );
+        app.update_device_state(DeviceState {
+            mode: InputMode::Auto,
+            auto_position: MicPosition::Near,
+            auto_tone: AutoTone::Dark,
+            ..DeviceState::default()
+        });
+        assert_eq!(app.device_state.auto_position, MicPosition::Near);
+        assert_eq!(app.device_state.auto_tone, AutoTone::Dark);
+    }
 
     #[test]
     fn mv7_focus_cycles_only_through_supported_controls_in_both_directions() {
@@ -1645,26 +1724,26 @@ mod tests {
     fn adjust_gain_increments_and_clamps_at_max() {
         let mut app = App::default();
         app.focus = Focus::Gain;
-        app.device_state.gain_db = 59;
+        app.device_state.gain_tenths = 590;
 
         app.adjust_focused(1);
-        assert_eq!(app.device_state.gain_db, 60);
+        assert_eq!(app.device_state.gain_tenths, 600);
 
         app.adjust_focused(1); // already at max
-        assert_eq!(app.device_state.gain_db, 60, "gain must not exceed 60");
+        assert_eq!(app.device_state.gain_tenths, 600, "gain must not exceed 60");
     }
 
     #[test]
     fn adjust_gain_decrements_and_clamps_at_zero() {
         let mut app = App::default();
         app.focus = Focus::Gain;
-        app.device_state.gain_db = 1;
+        app.device_state.gain_tenths = 10;
 
         app.adjust_focused(-1);
-        assert_eq!(app.device_state.gain_db, 0);
+        assert_eq!(app.device_state.gain_tenths, 0);
 
         app.adjust_focused(-1); // already at min
-        assert_eq!(app.device_state.gain_db, 0, "gain must not underflow");
+        assert_eq!(app.device_state.gain_tenths, 0, "gain must not underflow");
     }
 
     #[test]
@@ -1830,7 +1909,7 @@ mod tests {
         let mut app = App::default();
         app.device_model = DeviceModel::Mv6;
         app.focus = Focus::Gain;
-        app.device_state.gain_db = 20;
+        app.device_state.gain_tenths = 200;
         app.device_state.mv6_gain_locked = true;
 
         let action = app.adjust_focused(1);
@@ -1839,7 +1918,7 @@ mod tests {
             "adjust must return None when gain is locked"
         );
         assert_eq!(
-            app.device_state.gain_db, 20,
+            app.device_state.gain_tenths, 200,
             "gain must not change when locked"
         );
     }
@@ -1849,12 +1928,12 @@ mod tests {
         let mut app = App::default();
         app.device_model = DeviceModel::Mv6;
         app.focus = Focus::Gain;
-        app.device_state.gain_db = 20;
+        app.device_state.gain_tenths = 200;
         app.device_state.mv6_gain_locked = false;
 
         let action = app.adjust_focused(1);
-        assert!(matches!(action, Some(DeviceAction::SetGain(21))));
-        assert_eq!(app.device_state.gain_db, 21);
+        assert!(matches!(action, Some(DeviceAction::SetGain(210))));
+        assert_eq!(app.device_state.gain_tenths, 210);
     }
 
     // ── toggle_focused ────────────────────────────────────────────────────────
@@ -2287,7 +2366,7 @@ mod tests {
         app.presets[2] = Some(PresetSlot {
             mv7: None,
             name: String::from("Test"),
-            gain_db: 36,
+            gain_db: 36.0,
             mode: SerInputMode::Manual,
             auto_position: SerMicPosition::Near,
             auto_tone: SerAutoTone::Natural,

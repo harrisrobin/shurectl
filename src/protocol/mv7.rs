@@ -3,9 +3,29 @@
 use super::{AutoTone, CompressorPreset, DeviceState, InputMode, MicPosition};
 use anyhow::{Context, Result, bail, ensure};
 
-const MIX_MIN: u32 = 0x20C5;
+// MOTIV's 2% capture is one count below the rounded -54 dB word.
+const MIX_MIN: u32 = 0x20C4;
 const MIX_PC_MAX: u32 = 0x2026F3;
 const MIX_MIC_MAX: u32 = 0x4026E7;
+pub const GAIN_STEP_TENTHS: u16 = 15;
+pub const FAILED_REPLY: &str = "[Failed]";
+pub const GAIN_SET_PREFIX: &str = "inputGain ";
+
+// MOTIV measurements from biozz's PR #89, on firmware 0.0.52.0.
+// https://github.com/Humblemonk/shurectl/pull/89
+const MIX_CURVE: [(u8, f64, f64); 11] = [
+    (0, -54.0, 0.0),
+    (2, -54.0, 0.0),
+    (10, -39.0, 0.0),
+    (26, -19.5, 0.0),
+    (40, -10.0, 0.0),
+    (50, -6.0, 0.0),
+    (60, -6.0, -6.0),
+    (74, -6.0, -16.5),
+    (90, -6.0, -39.0),
+    (98, -6.0, -51.0),
+    (100, -6.0, -54.0),
+];
 
 pub fn report(command: &str) -> Result<[u8; 65]> {
     ensure!(
@@ -55,11 +75,11 @@ pub fn apply_response(line: &str, state: &mut DeviceState) -> Result<bool> {
                     apply_auto(mode - 1, state)?;
                 }
             }
-            "inputGain" => state.gain_db = decibels(value, 0.0, 36.0)? as u8,
+            "inputGain" => state.gain_tenths = (decibels(value, 0.0, 36.0)? * 10.0).round() as u16,
             "micMute" => state.muted = boolean(value)?,
             "lock" => state.locked = boolean(value)?,
             "audioMute" => state.mv7.monitor_muted = boolean(value)?,
-            "volume" => state.mv7.monitor_volume_db = decibels(value, -24.0, 0.0)?,
+            "volume" => state.mv7.monitor_volume_db = decibels(value, -24.0, 0.0)?.round() as i8,
             "meterMode" => state.mv7.live_meters = boolean(value)?,
             "dimMode" => state.mv7.dim_leds = boolean(value)?,
             "fwVersion" => {
@@ -134,13 +154,13 @@ fn boolean(value: &str) -> Result<bool> {
     }
 }
 
-fn decibels(value: &str, min: f32, max: f32) -> Result<i8> {
+fn decibels(value: &str, min: f32, max: f32) -> Result<f32> {
     let db: f32 = value.strip_suffix("dB").unwrap_or(value).trim().parse()?;
     ensure!(
         db.is_finite() && (min..=max).contains(&db),
         "Invalid MV7 level: {value}"
     );
-    Ok(db.round() as i8)
+    Ok(db)
 }
 
 fn word(payload: &str) -> Result<u32> {
@@ -182,16 +202,26 @@ pub fn auto_value(position: MicPosition, tone: AutoTone) -> u32 {
         }
 }
 
-pub fn mix_words(percent: u8) -> (u32, u32) {
-    let percent = u32::from(percent.min(100));
-    if percent <= 50 {
-        (MIX_MIN + (MIX_PC_MAX - MIX_MIN) * percent / 50, MIX_MIC_MAX)
-    } else {
-        (
-            MIX_PC_MAX,
-            MIX_MIN + (MIX_MIC_MAX - MIX_MIN) * (100 - percent) / 50,
-        )
+fn mix_levels(percent: u8) -> (f64, f64) {
+    let percent = percent.min(100);
+    for pair in MIX_CURVE.windows(2) {
+        let (start, pc_start, mic_start) = pair[0];
+        let (end, pc_end, mic_end) = pair[1];
+        if percent <= end {
+            let fraction = f64::from(percent - start) / f64::from(end - start);
+            return (
+                pc_start + fraction * (pc_end - pc_start),
+                mic_start + fraction * (mic_end - mic_start),
+            );
+        }
     }
+    (-6.0, -54.0)
+}
+
+pub fn mix_words(percent: u8) -> (u32, u32) {
+    let (pc, mic) = mix_levels(percent);
+    let word = |db| (f64::from(MIX_MIC_MAX) * 10f64.powf(db / 20.0)).round() as u32;
+    (word(pc), word(mic))
 }
 
 pub fn mix_percent(pc: u32, mic: u32) -> Result<u8> {
@@ -199,18 +229,24 @@ pub fn mix_percent(pc: u32, mic: u32) -> Result<u8> {
         (MIX_MIN..=MIX_PC_MAX).contains(&pc) && (MIX_MIN..=MIX_MIC_MAX).contains(&mic),
         "Invalid MV7 monitor mix levels"
     );
-    let pc_fraction = (pc - MIX_MIN) as f64 / (MIX_PC_MAX - MIX_MIN) as f64;
-    let mic_fraction = (mic - MIX_MIN) as f64 / (MIX_MIC_MAX - MIX_MIN) as f64;
-    Ok(if mic_fraction >= pc_fraction {
-        50.0 * pc_fraction
-    } else {
-        100.0 - 50.0 * mic_fraction
+    let db = |word| 20.0 * (f64::from(word) / f64::from(MIX_MIC_MAX)).log10();
+    let (pc_db, mic_db) = (db(pc), db(mic));
+    let mut nearest = 0;
+    let mut best_distance = f64::INFINITY;
+    for percent in 0..=100 {
+        let (expected_pc, expected_mic) = mix_levels(percent);
+        let distance = (pc_db - expected_pc).powi(2) + (mic_db - expected_mic).powi(2);
+        if distance < best_distance {
+            best_distance = distance;
+            nearest = percent;
+        }
     }
-    .round() as u8)
+    Ok(nearest)
 }
 
 /// Only the documented, single-report settings queries are used here.
 pub const GET_LOCK: &str = "lock";
+pub const GET_GAIN: &str = "inputGain";
 pub const GET_SERIAL: &str = "serialNum";
 pub const GET_AUTO: &str = "getBlock 34";
 pub const LOCK_SET_PREFIX: &str = "lock ";
@@ -218,7 +254,7 @@ pub const GETTERS: &[&str] = &[
     "fwVersion",
     GET_SERIAL,
     "dspMode",
-    "inputGain",
+    GET_GAIN,
     "micMute",
     GET_LOCK,
     "audioMute",
@@ -260,11 +296,36 @@ pub fn verify_set(command: &str, response: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_gain(db: u8) -> String {
-    format!("inputGain {}", db.min(36))
+pub fn verify_gain(tenths: u16, response: &str) -> Result<()> {
+    ensure!(
+        response.starts_with(&response_prefix(GET_GAIN)),
+        "Missing MV7 gain reply: {response}"
+    );
+    let mut state = DeviceState::default();
+    apply_response(response, &mut state)?;
+    ensure!(
+        state.gain_tenths == tenths,
+        "MV7 gain readback differs from {} dB: {response}",
+        super::format_gain(tenths)
+    );
+    Ok(())
 }
-pub fn cmd_mode(auto: bool) -> String {
-    format!("dspMode {}", if auto { 2 } else { 1 })
+
+pub fn cmd_gain(tenths: u16) -> String {
+    format!(
+        "{GAIN_SET_PREFIX}{}",
+        super::format_gain(super::DeviceModel::Mv7.clamp_gain(tenths))
+    )
+}
+pub fn cmd_mode(auto: bool, position: MicPosition, tone: AutoTone) -> String {
+    format!(
+        "dspMode {}",
+        if auto {
+            auto_value(position, tone) + 1
+        } else {
+            1
+        }
+    )
 }
 pub fn cmd_mute(on: bool) -> String {
     switch("micMute", on)
@@ -302,7 +363,7 @@ pub fn cmd_eq(high_pass: bool, presence: bool) -> String {
     block("31", u32::from(high_pass) | (u32::from(presence) << 1))
 }
 pub fn cmd_auto(position: MicPosition, tone: AutoTone) -> String {
-    block("34", auto_value(position, tone))
+    cmd_mode(true, position, tone)
 }
 pub fn cmd_mix(percent: u8) -> String {
     let (pc, mic) = mix_words(percent);
@@ -321,11 +382,93 @@ mod tests {
     use crate::protocol::CompressorPreset;
 
     #[test]
+    fn fractional_gain_survives_readback() {
+        let mut state = DeviceState::default();
+        apply_response("inputGain=31.5dB", &mut state).unwrap();
+        assert_eq!(state.gain_tenths, 315);
+    }
+
+    #[test]
+    fn motiv_two_percent_capture_decodes_as_floor() {
+        let mut state = DeviceState::default();
+        apply_response("block 22 000020C4004026E7", &mut state).unwrap();
+        assert_eq!(state.monitor_mix, 0);
+        assert!(mix_percent(0x20C3, 0x4026E7).is_err());
+    }
+
+    #[test]
+    fn gain_commands_floor_to_grid_and_require_matching_readback() {
+        for (tenths, command) in [
+            (0, "inputGain 0"),
+            (315, "inputGain 31.5"),
+            (330, "inputGain 33"),
+            (340, "inputGain 33"),
+            (345, "inputGain 34.5"),
+            (u16::MAX, "inputGain 36"),
+        ] {
+            assert_eq!(cmd_gain(tenths), command);
+        }
+        verify_gain(315, "inputGain=31.5dB").unwrap();
+        verify_gain(330, "inputGain=33.0dB").unwrap();
+        for reply in [
+            "inputGain=30dB",
+            "inputGain=NaN",
+            "[Failed]",
+            "Locked",
+            "micMute=off",
+        ] {
+            assert!(verify_gain(315, reply).is_err(), "{reply}");
+        }
+    }
+
+    #[test]
+    fn mix_intermediates_roundtrip_with_the_motiv_floor() {
+        for percent in 0..=100 {
+            let (pc, mic) = mix_words(percent);
+            assert_eq!(
+                mix_percent(pc, mic).unwrap(),
+                if percent <= 2 { 0 } else { percent }
+            );
+        }
+    }
+
+    #[test]
+    fn monitor_mix_matches_independent_motiv_captures() {
+        for (percent, pc, mic) in [
+            (0, 0x000020C5, 0x004026E7),
+            (10, 0x0000B845, 0x004026E7),
+            (26, 0x0006CB9A, 0x004026E7),
+            (40, 0x00144961, 0x004026E7),
+            (50, 0x002026F3, 0x004026E7),
+            (60, 0x002026F3, 0x002026F3),
+            (74, 0x002026F3, 0x00099941),
+            (90, 0x002026F3, 0x0000B845),
+            (100, 0x002026F3, 0x000020C5),
+        ] {
+            assert_eq!(mix_words(percent), (pc, mic), "encode {percent}%");
+            assert_eq!(mix_percent(pc, mic).unwrap(), percent, "decode {percent}%");
+        }
+    }
+
+    #[test]
+    fn far_profile_uses_the_complete_dsp_preset() {
+        assert_eq!(cmd_auto(MicPosition::Far, AutoTone::Natural), "dspMode 5");
+    }
+
+    #[test]
     fn setting_commands_match_documented_wire_values_and_clamp_limits() {
         for (command, expected, response) in [
-            (cmd_gain(255), "inputGain 36", "inputGain=36dB"),
-            (cmd_mode(false), "dspMode 1", "dspMode=1"),
-            (cmd_mode(true), "dspMode 2", "dspMode=2"),
+            (cmd_gain(u16::MAX), "inputGain 36", "inputGain=36dB"),
+            (
+                cmd_mode(false, MicPosition::Far, AutoTone::Bright),
+                "dspMode 1",
+                "dspMode=1",
+            ),
+            (
+                cmd_mode(true, MicPosition::Near, AutoTone::Natural),
+                "dspMode 2",
+                "dspMode=2",
+            ),
             (cmd_mute(true), "micMute on", "micMute=on"),
             (cmd_lock(false), "lock off", "lock=off"),
             (cmd_monitor_mute(false), "audioMute off", "audioMute=off"),
@@ -350,8 +493,8 @@ mod tests {
             ),
             (
                 cmd_auto(MicPosition::Far, AutoTone::Bright),
-                "setBlock 34 00000006",
-                "block 34 00000006",
+                "dspMode 7",
+                "dspMode=7",
             ),
             (
                 cmd_mix(50),
@@ -444,7 +587,7 @@ mod tests {
         ] {
             assert!(apply_response(response, &mut state).unwrap(), "{response}");
         }
-        assert_eq!(state.gain_db, 33);
+        assert_eq!(state.gain_tenths, 330);
         assert!(state.locked);
         assert!(!state.muted);
         assert_eq!(state.monitor_mix, 50);

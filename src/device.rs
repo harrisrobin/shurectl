@@ -200,6 +200,11 @@ impl ShureDevice {
                 continue;
             }
             let response = mv7::line(&buffer[..count])?;
+            // An unchanged gain can return [Failed]; only its setter may recover
+            // by proving the requested value through a separate GET.
+            if command.starts_with(mv7::GAIN_SET_PREFIX) && response == mv7::FAILED_REPLY {
+                return Ok(response.to_owned());
+            }
             // Decode even an unrelated response to surface explicit device errors.
             mv7::apply_response(response, &mut DeviceState::default())?;
             if response.starts_with(&prefix) {
@@ -211,15 +216,29 @@ impl ShureDevice {
 
     fn mv7_set(&self, command: String) -> Result<()> {
         if !command.starts_with(mv7::LOCK_SET_PREFIX) {
-            let mut state = DeviceState::default();
-            mv7::apply_response(&self.mv7_request(mv7::GET_LOCK)?, &mut state)?;
-            anyhow::ensure!(
-                !state.locked,
-                "Unlock Config Lock before changing MV7 settings"
-            );
+            self.mv7_require_unlocked()?;
         }
         let response = self.mv7_request(&command)?;
         mv7::verify_set(&command, &response)
+    }
+
+    fn mv7_require_unlocked(&self) -> Result<()> {
+        let mut state = DeviceState::default();
+        mv7::apply_response(&self.mv7_request(mv7::GET_LOCK)?, &mut state)?;
+        anyhow::ensure!(
+            !state.locked,
+            "Unlock Config Lock before changing MV7 settings"
+        );
+        Ok(())
+    }
+
+    fn mv7_set_gain(&self, tenths: u16) -> Result<()> {
+        self.mv7_require_unlocked()?;
+        let response = self.mv7_request(&mv7::cmd_gain(tenths))?;
+        if response != mv7::FAILED_REPLY {
+            mv7::verify_gain(tenths, &response)?;
+        }
+        mv7::verify_gain(tenths, &self.mv7_request(mv7::GET_GAIN)?)
     }
 
     fn get_state_mv7(&self) -> Result<DeviceState> {
@@ -523,11 +542,11 @@ impl ShureDevice {
     // ── Shared SET commands ───────────────────────────────────────────────────
 
     /// Set manual gain. Clamped to the model's maximum.
-    pub fn set_gain(&self, gain_db: u8) -> Result<()> {
+    pub fn set_gain(&self, gain_tenths: u16) -> Result<()> {
         if self.model == DeviceModel::Mv7 {
-            return self.mv7_set(mv7::cmd_gain(gain_db));
+            return self.mv7_set_gain(self.model.clamp_gain(gain_tenths));
         }
-        let clamped = gain_db.min(self.model.max_gain_db());
+        let clamped = (self.model.clamp_gain(gain_tenths) / 10) as u8;
         let pkt = match self.model {
             DeviceModel::Mv7Plus => cmd_set_mv7_gain(self.next_seq(), clamped),
             _ => protocol::cmd_set_gain(self.next_seq(), clamped),
@@ -535,9 +554,14 @@ impl ShureDevice {
         self.send_set(&pkt)
     }
 
-    pub fn set_mode(&self, auto: bool) -> Result<()> {
+    pub fn set_mode(
+        &self,
+        auto: bool,
+        position: protocol::MicPosition,
+        tone: protocol::AutoTone,
+    ) -> Result<()> {
         if self.model == DeviceModel::Mv7 {
-            return self.mv7_set(mv7::cmd_mode(auto));
+            return self.mv7_set(mv7::cmd_mode(auto, position, tone));
         }
         let pkt = match self.model {
             DeviceModel::Mv7Plus => protocol::cmd_set_mv7_mode(self.next_seq(), auto),
@@ -571,7 +595,7 @@ impl ShureDevice {
         if self.model == DeviceModel::Mv7 {
             let mut state = DeviceState::default();
             mv7::apply_response(&self.mv7_request(mv7::GET_AUTO)?, &mut state)?;
-            return self.mv7_set(mv7::cmd_auto(*position, state.auto_tone));
+            return self.set_mv7_auto(*position, state.auto_tone);
         }
         self.send_set(&protocol::cmd_set_auto_position(self.next_seq(), position))
     }
@@ -580,7 +604,7 @@ impl ShureDevice {
         if self.model == DeviceModel::Mv7 {
             let mut state = DeviceState::default();
             mv7::apply_response(&self.mv7_request(mv7::GET_AUTO)?, &mut state)?;
-            return self.mv7_set(mv7::cmd_auto(state.auto_position, *tone));
+            return self.set_mv7_auto(state.auto_position, *tone);
         }
         self.send_set(&protocol::cmd_set_auto_tone(self.next_seq(), tone))
     }

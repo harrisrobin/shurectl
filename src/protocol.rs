@@ -214,6 +214,18 @@ impl DeviceModel {
         }
     }
 
+    pub fn gain_step_tenths(&self) -> u16 {
+        match self {
+            Self::Mv7 => mv7::GAIN_STEP_TENTHS,
+            Self::Mvx2u | Self::Mvx2uGen2 | Self::Mv6 | Self::Mv7Plus => 10,
+        }
+    }
+
+    pub fn clamp_gain(&self, tenths: u16) -> u16 {
+        let clamped = tenths.min(u16::from(self.max_gain_db()) * 10);
+        clamped - clamped % self.gain_step_tenths()
+    }
+
     /// Human-readable model name for display.
     pub fn display_name(&self) -> &'static str {
         match self {
@@ -225,6 +237,14 @@ impl DeviceModel {
         }
     }
 }
+pub fn format_gain(tenths: u16) -> String {
+    if tenths.is_multiple_of(10) {
+        (tenths / 10).to_string()
+    } else {
+        format!("{}.{:01}", tenths / 10, tenths % 10)
+    }
+}
+
 pub const PACKET_SIZE: usize = 64;
 
 // Fixed header bytes
@@ -391,9 +411,9 @@ const PHANTOM_OFF: u8 = 0x00;
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceState {
     pub mv7: Mv7Settings,
-    /// Manual gain in dB. MVX2U range: 0–60. MV6 range: 0–36.
+    /// Manual gain in tenths of dB. MVX2U range: 0–600; MV6/MV7/MV7+: 0–360.
     /// Defaults to 36 dB (MVX2U factory default; also MV6 maximum).
-    pub gain_db: u8,
+    pub gain_tenths: u16,
     pub mode: InputMode,
     /// Mic position for Auto Level mode. MVX2U only.
     pub auto_position: MicPosition,
@@ -486,7 +506,7 @@ impl Default for DeviceState {
     fn default() -> Self {
         Self {
             mv7: Mv7Settings::default(),
-            gain_db: 36,
+            gain_tenths: 360,
             mode: InputMode::Auto,
             auto_position: MicPosition::Near,
             auto_tone: AutoTone::Natural,
@@ -1827,7 +1847,7 @@ pub fn apply_response(feat_addr: [u8; 2], value: &[u8], state: &mut DeviceState)
             let raw = u16::from_be_bytes([value[0], value[1]]);
             // No model-specific clamp here — apply_response is model-agnostic.
             // The adjustment layer (adjust_focused) enforces device_model.max_gain_db().
-            state.gain_db = (raw / 100) as u8;
+            state.gain_tenths = raw / 100 * 10;
             true
         }
         f if f == FEAT_MUTE => {
@@ -2681,7 +2701,7 @@ mod tests {
         let mut state = DeviceState::default();
         // 36 dB = raw 3600 = 0x0E10
         let _ = apply_response(FEAT_GAIN, &[0x0E, 0x10], &mut state);
-        assert_eq!(state.gain_db, 36);
+        assert_eq!(state.gain_tenths, 360);
     }
 
     #[test]
@@ -2690,14 +2710,14 @@ mod tests {
         // apply_response is model-agnostic — it does not clamp to any model's max.
         // raw 9000 / 100 = 90; the model-specific ceiling is enforced in adjust_focused.
         let _ = apply_response(FEAT_GAIN, &[0x23, 0x28], &mut state);
-        assert_eq!(state.gain_db, 90);
+        assert_eq!(state.gain_tenths, 900);
     }
 
     #[test]
     fn apply_response_gain_rejects_short_values() {
         // FEAT_GAIN needs 2 bytes (big-endian u16). Empty or 1-byte values must be rejected.
         let mut state = DeviceState::default();
-        let original = state.gain_db;
+        let original = state.gain_tenths;
         assert!(
             !apply_response(FEAT_GAIN, &[], &mut state),
             "empty must return false"
@@ -2707,7 +2727,7 @@ mod tests {
             "1-byte must return false"
         );
         assert_eq!(
-            state.gain_db, original,
+            state.gain_tenths, original,
             "state must not change on rejection"
         );
     }
@@ -2871,10 +2891,13 @@ mod tests {
     #[test]
     fn apply_response_unknown_feat_returns_false() {
         let mut state = DeviceState::default();
-        let original_gain = state.gain_db;
+        let original_gain = state.gain_tenths;
         let applied = apply_response([0xFF, 0xFF], &[0x01], &mut state);
         assert!(!applied, "unknown feature must return false");
-        assert_eq!(state.gain_db, original_gain, "state must not be mutated");
+        assert_eq!(
+            state.gain_tenths, original_gain,
+            "state must not be mutated"
+        );
     }
 
     #[test]

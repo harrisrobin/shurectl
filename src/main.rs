@@ -173,7 +173,7 @@ fn main() -> Result<()> {
         match dev.get_state() {
             Ok(mut state) => {
                 state.serial_number = dev.serial_number.clone();
-                app.device_state = state;
+                app.update_device_state(state);
                 app.set_ok(format!(
                     "Connected to {} — state loaded.",
                     dev.model.display_name()
@@ -451,7 +451,7 @@ fn apply_action(app: &mut App, device: &Option<ShureDevice>, action: DeviceActio
     {
         match dev.get_state() {
             Ok(state) => {
-                app.device_state = state;
+                app.update_device_state(state);
                 app.mv7_state_valid = true;
             }
             Err(e) => {
@@ -487,7 +487,7 @@ fn apply_action(app: &mut App, device: &Option<ShureDevice>, action: DeviceActio
                 match dev.get_state() {
                     Ok(mut state) => {
                         state.serial_number = dev.serial_number.clone();
-                        app.device_state = state;
+                        app.update_device_state(state);
                         app.set_ok("State refreshed from device.");
                         Ok(())
                     }
@@ -499,12 +499,18 @@ fn apply_action(app: &mut App, device: &Option<ShureDevice>, action: DeviceActio
             }
         }
         DeviceAction::SetGain(g) => {
-            app.set_ok(format!("Gain → {} dB", g));
+            app.set_ok(format!("Gain → {} dB", protocol::format_gain(*g)));
             send_if_connected(device, |d| d.set_gain(*g))
         }
         DeviceAction::SetMode(mode) => {
             app.set_ok(format!("Mode → {}", mode));
-            send_if_connected(device, |d| d.set_mode(*mode == InputMode::Auto))
+            send_if_connected(device, |d| {
+                d.set_mode(
+                    *mode == InputMode::Auto,
+                    app.device_state.auto_position,
+                    app.device_state.auto_tone,
+                )
+            })
         }
         DeviceAction::SetAutoPosition(pos) => {
             app.set_ok(format!("Mic Position → {}", pos));
@@ -729,6 +735,8 @@ fn apply_action(app: &mut App, device: &Option<ShureDevice>, action: DeviceActio
         DeviceAction::LoadPreset(i) => {
             if let Some(slot) = &app.presets[*i].clone() {
                 slot.apply_to_device_state(&mut app.device_state);
+                app.device_state.gain_tenths =
+                    app.device_model.clamp_gain(app.device_state.gain_tenths);
                 app.set_ok(format!("Loaded \"{}\".", slot.name));
                 apply_preset_to_device(device, &app.device_state, app.device_model)
             } else {
@@ -770,7 +778,7 @@ fn apply_action(app: &mut App, device: &Option<ShureDevice>, action: DeviceActio
     if refresh_mv7 && let Some(dev) = device {
         match dev.get_state() {
             Ok(state) => {
-                app.device_state = state;
+                app.update_device_state(state);
                 app.mv7_state_valid = true;
             }
             Err(e) => {
@@ -810,13 +818,17 @@ fn apply_preset_to_device(
                 !d.get_state()?.locked,
                 "Unlock Config Lock before loading a preset"
             );
-            d.set_mode(state.mode == InputMode::Auto)?;
+            d.set_mode(
+                state.mode == InputMode::Auto,
+                state.auto_position,
+                state.auto_tone,
+            )?;
             // Mode changes reload the DSP defaults. Wait for a complete readback first.
             d.get_state()?;
             match state.mode {
-                InputMode::Auto => d.set_mv7_auto(state.auto_position, state.auto_tone)?,
+                InputMode::Auto => {}
                 InputMode::Manual => {
-                    d.set_gain(state.gain_db)?;
+                    d.set_gain(state.gain_tenths)?;
                     d.set_mv7_eq(state.mv7.high_pass, state.mv7.presence)?;
                     d.set_limiter(state.limiter_enabled)?;
                     d.set_compressor(&state.compressor)?;
@@ -830,8 +842,12 @@ fn apply_preset_to_device(
             d.set_mv7_dim_leds(state.mv7.dim_leds)?;
             return Ok(());
         }
-        d.set_mode(state.mode == InputMode::Auto)?;
-        d.set_gain(state.gain_db)?;
+        d.set_mode(
+            state.mode == InputMode::Auto,
+            state.auto_position,
+            state.auto_tone,
+        )?;
+        d.set_gain(state.gain_tenths)?;
         d.set_mute(state.muted)?;
         d.set_hpf(&state.hpf)?;
         match model {

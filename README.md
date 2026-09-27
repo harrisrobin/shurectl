@@ -52,7 +52,7 @@ An open-source terminal UI configurator for Shure USB audio interfaces and micro
 - **Gain Lock** — hardware freeze of the gain control (Manual mode only)
 
 ### Original MV7
-- **Manual gain** — 0–36 dB in 1 dB steps
+- **Manual gain** — 0–36 dB in 1.5 dB steps
 - **Auto Level** — Near/Far distance and Natural/Dark/Bright tone
 - **EQ** — independent High-pass Filter and Presence Boost switches
 - **Dynamics** — limiter and Off/Light/Medium/Heavy compressor in Manual mode
@@ -66,8 +66,17 @@ gain-environment selector, denoiser, reverb, or RGB lighting on this model.
 
 Original MV7 settings are read back after changes. A failed read disables further
 changes until `r` successfully refreshes the device. Loading a preset applies the
-active mode's controls; Auto Level leaves the remembered manual gain untouched.
+active mode's controls; explicit gain writes are sent only in Manual mode.
 Older presets without an MV7 section preserve headphone and LED settings.
+Fractional gain values survive preset save/load; older integer values still load.
+Returning from Manual to Auto restores the distance and tone selected during the
+current session. Switching modes reloads DSP settings; save a preset before changing
+modes if you want to recover a particular manual setup.
+
+Monitor mix follows MOTIV's measured attenuation curve. Positions 0–2% share the same
+hardware floor and read back as 0%. Intermediate positions use interpolation.
+The limiter register has been checked by write/readback; its effect on recorded audio
+has not yet been verified.
 
 Tested on an original MV7 running firmware `0.0.52.0` on macOS with a USB connection.
 Linux and Windows hardware behavior has not been verified for this model.
@@ -263,7 +272,8 @@ its DSP. Firmware-update and raw memory commands are not implemented.
 | Mode, gain, microphone mute, configuration lock | `dspMode`, `inputGain`, `micMute`, `lock` |
 | Headphone mute and volume, panel LEDs | `audioMute`, `volume`, `meterMode`, `dimMode` |
 | Monitor mix, compressor, limiter | Blocks `22`, `19`, `1F` |
-| High-pass/presence switches, Auto Level profile | Blocks `31`, `34` |
+| High-pass/presence switches | Block `31` |
+| Auto Level profile | `dspMode` (`2`–`7`); block `34` readback |
 
 Replies are matched to the requested property, validated, and bounded by a three-second
 timeout. All six Auto Level profiles (`dspMode=2` through `7`) are accepted. Gain is
@@ -281,6 +291,8 @@ Original MV7 protocol references: [mv7config](https://github.com/matteodelabre/m
 [OpenMV7](https://github.com/vladikk/openmv7), and the
 [MV7 vendor HID protocol documentation](https://github.com/schlarpc/shure-mv7-firmware-re/blob/main/hid-protocol.md).
 The original MV7 command behavior was also verified directly on connected hardware.
+Gain-step observations and measured MOTIV monitor-mix points come from
+[biozz's original MV7 PR #89](https://github.com/Humblemonk/shurectl/pull/89).
 
 ---
 

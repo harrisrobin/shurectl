@@ -257,6 +257,60 @@ fn draw_main_left(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn draw_gain_gauge(f: &mut Frame, app: &App, area: Rect) {
+    let gain_focused = app.focus == Focus::Gain;
+    let gain = crate::protocol::format_gain(app.device_state.gain_tenths);
+    let gain_locked = matches!(app.device_model, DeviceModel::Mv6 | DeviceModel::Mvx2uGen2)
+        && app.device_state.mv6_gain_locked;
+    let gauge = Gauge::default()
+        .block(
+            Block::default()
+                .title(Line::from(vec![
+                    Span::styled("  GAIN  ", focused_style(gain_focused)),
+                    Span::styled(
+                        format!(" {} dB ", gain),
+                        Style::default()
+                            .fg(if gain_locked { C_DIM } else { C_ACCENT })
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        if gain_focused && !gain_locked {
+                            "  ◄ ► or ←→ to adjust"
+                        } else if gain_focused && gain_locked {
+                            "  🔒 locked"
+                        } else {
+                            ""
+                        },
+                        Style::default().fg(C_DIM),
+                    ),
+                ]))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(if gain_focused {
+                    Style::default().fg(C_FOCUS)
+                } else {
+                    Style::default().fg(C_BORDER)
+                }),
+        )
+        .gauge_style(
+            Style::default()
+                .fg(if gain_locked { C_DISABLED } else { C_ACCENT })
+                .bg(C_SURFACE)
+                .add_modifier(if gain_focused {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        )
+        .ratio(
+            (f64::from(app.device_state.gain_tenths)
+                / (f64::from(app.device_model.max_gain_db()) * 10.0))
+                .clamp(0.0, 1.0),
+        )
+        .label(format!("{gain} / {} dB", app.device_model.max_gain_db()));
+    f.render_widget(gauge, area);
+}
+
 fn draw_main_left_mv7plus(f: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -275,45 +329,7 @@ fn draw_main_left_mv7plus(f: &mut Frame, app: &App, area: Rect) {
     draw_mode_block(f, app, rows[0]);
     draw_mute_block(f, app, rows[1]);
 
-    let gain_focused = app.focus == Focus::Gain;
-    let gain = app.device_state.gain_db;
-    let gauge =
-        Gauge::default()
-            .block(
-                Block::default()
-                    .title(Line::from(vec![
-                        Span::styled("  GAIN  ", focused_style(gain_focused)),
-                        Span::styled(
-                            format!(" {} dB ", gain),
-                            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            if gain_focused {
-                                "  ◄ ► or ←→ to adjust"
-                            } else {
-                                ""
-                            },
-                            Style::default().fg(C_DIM),
-                        ),
-                    ]))
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(if gain_focused {
-                        Style::default().fg(C_FOCUS)
-                    } else {
-                        Style::default().fg(C_BORDER)
-                    }),
-            )
-            .gauge_style(Style::default().fg(C_ACCENT).bg(C_SURFACE).add_modifier(
-                if gain_focused {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                },
-            ))
-            .ratio(gain as f64 / app.device_model.max_gain_db() as f64)
-            .label(format!("{gain} / {} dB", app.device_model.max_gain_db()));
-    f.render_widget(gauge, rows[2]);
+    draw_gain_gauge(f, app, rows[2]);
 
     draw_meter(f, app, rows[3]);
     draw_monitor_mix_gauge(f, app, rows[4]);
@@ -387,52 +403,7 @@ fn draw_main_left_mv6_manual(f: &mut Frame, app: &App, area: Rect) {
     draw_mode_block(f, app, rows[0]);
     draw_mute_block(f, app, rows[1]);
 
-    let gain_focused = app.focus == Focus::Gain;
-    let gain = app.device_state.gain_db;
-    let gain_locked = app.device_state.mv6_gain_locked;
-    let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .title(Line::from(vec![
-                    Span::styled("  GAIN  ", focused_style(gain_focused)),
-                    Span::styled(
-                        format!(" {} dB ", gain),
-                        Style::default()
-                            .fg(if gain_locked { C_DIM } else { C_ACCENT })
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        if gain_focused && !gain_locked {
-                            "  ◄ ► or ←→ to adjust"
-                        } else if gain_focused && gain_locked {
-                            "  🔒 locked"
-                        } else {
-                            ""
-                        },
-                        Style::default().fg(C_DIM),
-                    ),
-                ]))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(if gain_focused {
-                    Style::default().fg(C_FOCUS)
-                } else {
-                    Style::default().fg(C_BORDER)
-                }),
-        )
-        .gauge_style(
-            Style::default()
-                .fg(if gain_locked { C_DISABLED } else { C_ACCENT })
-                .bg(C_SURFACE)
-                .add_modifier(if gain_focused {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-        )
-        .ratio(gain as f64 / app.device_model.max_gain_db() as f64)
-        .label(format!("{gain} / {} dB", app.device_model.max_gain_db()));
-    f.render_widget(gauge, rows[2]);
+    draw_gain_gauge(f, app, rows[2]);
 
     draw_gain_lock_block(f, app, rows[3]);
 
@@ -479,52 +450,7 @@ fn draw_main_left_gen2_manual(f: &mut Frame, app: &App, area: Rect) {
     draw_mode_block(f, app, rows[0]);
     draw_mute_block(f, app, rows[1]);
 
-    let gain_focused = app.focus == Focus::Gain;
-    let gain = app.device_state.gain_db;
-    let gain_locked = app.device_state.mv6_gain_locked;
-    let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .title(Line::from(vec![
-                    Span::styled("  GAIN  ", focused_style(gain_focused)),
-                    Span::styled(
-                        format!(" {} dB ", gain),
-                        Style::default()
-                            .fg(if gain_locked { C_DIM } else { C_ACCENT })
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        if gain_focused && !gain_locked {
-                            "  ◄ ► or ←→ to adjust"
-                        } else if gain_focused && gain_locked {
-                            "  🔒 locked"
-                        } else {
-                            ""
-                        },
-                        Style::default().fg(C_DIM),
-                    ),
-                ]))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(if gain_focused {
-                    Style::default().fg(C_FOCUS)
-                } else {
-                    Style::default().fg(C_BORDER)
-                }),
-        )
-        .gauge_style(
-            Style::default()
-                .fg(if gain_locked { C_DISABLED } else { C_ACCENT })
-                .bg(C_SURFACE)
-                .add_modifier(if gain_focused {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-        )
-        .ratio(gain as f64 / app.device_model.max_gain_db() as f64)
-        .label(format!("{gain} / {} dB", app.device_model.max_gain_db()));
-    f.render_widget(gauge, rows[2]);
+    draw_gain_gauge(f, app, rows[2]);
 
     draw_gain_lock_block(f, app, rows[3]);
     draw_meter(f, app, rows[4]);
@@ -586,45 +512,7 @@ fn draw_main_left_manual(f: &mut Frame, app: &App, area: Rect) {
     draw_mute_block(f, app, rows[1]);
 
     // ── Gain ──────────────────────────────────────────────────────────────────
-    let gain_focused = app.focus == Focus::Gain;
-    let gain = app.device_state.gain_db;
-    let gauge =
-        Gauge::default()
-            .block(
-                Block::default()
-                    .title(Line::from(vec![
-                        Span::styled("  GAIN  ", focused_style(gain_focused)),
-                        Span::styled(
-                            format!(" {} dB ", gain),
-                            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            if gain_focused {
-                                "  ◄ ► or ←→ to adjust"
-                            } else {
-                                ""
-                            },
-                            Style::default().fg(C_DIM),
-                        ),
-                    ]))
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(if gain_focused {
-                        Style::default().fg(C_FOCUS)
-                    } else {
-                        Style::default().fg(C_BORDER)
-                    }),
-            )
-            .gauge_style(Style::default().fg(C_ACCENT).bg(C_SURFACE).add_modifier(
-                if gain_focused {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                },
-            ))
-            .ratio(gain as f64 / app.device_model.max_gain_db() as f64)
-            .label(format!("{gain} / {} dB", app.device_model.max_gain_db()));
-    f.render_widget(gauge, rows[2]);
+    draw_gain_gauge(f, app, rows[2]);
 
     draw_main_shared(f, app, &rows[3..]);
 }
@@ -1144,7 +1032,10 @@ fn draw_main_right(f: &mut Frame, app: &App, area: Rect) {
                 InputMode::Manual => {
                     vec![Line::from(vec![
                         Span::styled("Gain        : ", Style::default().fg(C_DIM)),
-                        Span::styled(format!("{} dB", ds.gain_db), Style::default().fg(C_TEXT)),
+                        Span::styled(
+                            format!("{} dB", crate::protocol::format_gain(ds.gain_tenths)),
+                            Style::default().fg(C_TEXT),
+                        ),
                     ])]
                 }
                 InputMode::Auto => vec![
@@ -1259,7 +1150,10 @@ fn draw_main_right(f: &mut Frame, app: &App, area: Rect) {
             if ds.mode == InputMode::Manual {
                 l.push(Line::from(vec![
                     Span::styled("Gain        : ", Style::default().fg(C_DIM)),
-                    Span::styled(format!("{} dB", ds.gain_db), Style::default().fg(C_TEXT)),
+                    Span::styled(
+                        format!("{} dB", crate::protocol::format_gain(ds.gain_tenths)),
+                        Style::default().fg(C_TEXT),
+                    ),
                 ]));
                 l.push(Line::from(vec![
                     Span::styled("Gain Lock   : ", Style::default().fg(C_DIM)),
@@ -1333,7 +1227,10 @@ fn draw_main_right(f: &mut Frame, app: &App, area: Rect) {
                 ]),
                 Line::from(vec![
                     Span::styled("Gain        : ", Style::default().fg(C_DIM)),
-                    Span::styled(format!("{} dB", ds.gain_db), Style::default().fg(C_TEXT)),
+                    Span::styled(
+                        format!("{} dB", crate::protocol::format_gain(ds.gain_tenths)),
+                        Style::default().fg(C_TEXT),
+                    ),
                 ]),
                 Line::from(vec![
                     Span::styled("Tone        : ", Style::default().fg(C_DIM)),
@@ -1429,7 +1326,10 @@ fn draw_main_right(f: &mut Frame, app: &App, area: Rect) {
             if ds.mode == InputMode::Manual {
                 l.push(Line::from(vec![
                     Span::styled("Gain        : ", Style::default().fg(C_DIM)),
-                    Span::styled(format!("{} dB", ds.gain_db), Style::default().fg(C_TEXT)),
+                    Span::styled(
+                        format!("{} dB", crate::protocol::format_gain(ds.gain_tenths)),
+                        Style::default().fg(C_TEXT),
+                    ),
                 ]));
                 l.push(Line::from(vec![
                     Span::styled("Gain Lock   : ", Style::default().fg(C_DIM)),
@@ -3463,6 +3363,7 @@ mod tests {
         };
         for mode in [InputMode::Auto, InputMode::Manual] {
             app.device_state.mode = mode;
+            app.device_state.gain_tenths = 315;
             let text = rendered_at(&app, 80, 24);
             for label in [
                 "Input Mode",
@@ -3479,6 +3380,7 @@ mod tests {
                 assert!(text.contains("Mic Position:"));
             } else {
                 assert!(text.contains("GAIN"));
+                assert!(text.contains("31.5 / 36 dB"));
             }
         }
     }
